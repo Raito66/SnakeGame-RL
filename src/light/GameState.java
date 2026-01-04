@@ -64,6 +64,21 @@ public class GameState {
         sb.append("\"done\":").append(done ? "true" : "false").append(",");
         sb.append("\"direction\":").append(direction).append(",");
         sb.append("\"reward\":").append(reward).append(",");
+
+        // \`board\`：給 Python 當 observation
+        sb.append("\"board\":[");
+        for (int y = 0; y < board.length; y++) {
+            sb.append("[");
+            for (int x = 0; x < board[0].length; x++) {
+                sb.append(board[y][x]);
+                if (x < board[0].length - 1) sb.append(",");
+            }
+            sb.append("]");
+            if (y < board.length - 1) sb.append(",");
+        }
+        sb.append("],");
+
+        // \`snakeBody\`
         sb.append("\"snakeBody\":[");
         for (int i = 0; i < snakeBody.size(); i++) {
             int[] p = snakeBody.get(i);
@@ -71,6 +86,7 @@ public class GameState {
             if (i < snakeBody.size() - 1) sb.append(",");
         }
         sb.append("]");
+
         sb.append("}");
 
         try (FileWriter fw = new FileWriter(path)) {
@@ -79,6 +95,7 @@ public class GameState {
             e.printStackTrace();
         }
     }
+
 
     // 從 action.json 讀取動作: { "action": 0~3 }
     public static int readActionFromJson(String path) {
