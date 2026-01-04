@@ -41,10 +41,10 @@ public class SnakeWindow extends JFrame {
         this.episodesField = new JTextField("20", 5);
         this.maxStepsField = new JTextField("200", 5);
 
-        this.startRLPlayButton = new JButton("開始自動玩(RL)");
+        this.startRLPlayButton = new JButton("開始訓練+自動玩(RL)");
         this.rule0PlayButton = new JButton("規0 自動玩(隨機)");
 
-        topPanel.add(new JLabel("局數:"));
+        topPanel.add(new JLabel("局數(訓練+重播):"));
         topPanel.add(episodesField);
         topPanel.add(new JLabel("每局最大步數:"));
         topPanel.add(maxStepsField);
@@ -69,7 +69,7 @@ public class SnakeWindow extends JFrame {
         setVisible(true);
     }
 
-    // 按「開始自動玩(RL)」
+    /** 按「開始訓練+自動玩(RL)」 */
     private void onStartRLPlay() {
         // 若已有 Timer 在跑，先停
         if (gameLoopTimer != null && gameLoopTimer.isRunning()) {
@@ -84,7 +84,7 @@ public class SnakeWindow extends JFrame {
         } catch (NumberFormatException ex) {
             JOptionPane.showMessageDialog(
                     this,
-                    "請在「局數」與「每局最大步數」輸入正整數。",
+                    "請輸入正確的整數（局數與每局最大步數）。",
                     "輸入錯誤",
                     JOptionPane.ERROR_MESSAGE
             );
@@ -94,27 +94,50 @@ public class SnakeWindow extends JFrame {
         if (episodes <= 0 || maxSteps <= 0) {
             JOptionPane.showMessageDialog(
                     this,
-                    "局數與每局最大步數都必須大於 0。",
+                    "局數與每局最大步數必須大於 0。",
                     "輸入錯誤",
                     JOptionPane.ERROR_MESSAGE
             );
             return;
         }
 
-        this.maxEpisodes = episodes;
-        this.maxStepsPerEpisode = maxSteps;
-        this.currentEpisode = 1;
-        this.stepCountInEpisode = 0;
-        this.currentDelayMs = baseDelayMs;
+        // 先依 Viewer 的輸入寫 config.json 並啟動 Python 訓練（同步等待）
+        statusLabel.setText("正在訓練 DQN，請稍候...");
+        startRLPlayButton.setEnabled(false);
+        rule0PlayButton.setEnabled(false);
 
-        gameState.reset();
-        statusLabel.setText("RL 自動玩中，第 1 局 / " + maxEpisodes
-                + "，速度：" + currentDelayMs + "ms");
+        // 避免卡住 EDT，用背景執行緒做訓練
+        new Thread(() -> {
+            boolean ok = PythonTrainerLauncher.runTrainingWithConfig(this, episodes, maxSteps);
 
-        startGameLoopTimer(true);
+            SwingUtilities.invokeLater(() -> {
+                startRLPlayButton.setEnabled(true);
+                rule0PlayButton.setEnabled(true);
+
+                if (!ok) {
+                    statusLabel.setText("訓練失敗或被中斷，請查看 console。");
+                    return;
+                }
+
+                // 訓練成功後，設定 Viewer 自己的播放參數
+                this.maxEpisodes = episodes;
+                this.maxStepsPerEpisode = maxSteps;
+                this.currentEpisode = 1;
+                this.stepCountInEpisode = 0;
+                this.currentDelayMs = baseDelayMs;
+
+                gameState.reset();
+                statusLabel.setText("RL 自動玩中，第 1 局 / " + maxEpisodes
+                        + "，每局最多 " + maxStepsPerEpisode + " 步。");
+
+                // 這裡假設你已經另外啟動 `agent/eval_play.py`，
+                // 它會一直寫 `action.json`，GameState.stepFromActionFileOrRandom() 會讀。
+                startGameLoopTimer(true);
+            });
+        }).start();
     }
 
-    // 按「規0 自動玩(隨機)」
+    /** 按「規0 自動玩(隨機)」──不觸發訓練，只用 Java 亂數走 */
     private void onStartRule0Play() {
         if (gameLoopTimer != null && gameLoopTimer.isRunning()) {
             gameLoopTimer.stop();
@@ -128,7 +151,7 @@ public class SnakeWindow extends JFrame {
         } catch (NumberFormatException ex) {
             JOptionPane.showMessageDialog(
                     this,
-                    "請在「局數」與「每局最大步數」輸入正整數。",
+                    "請輸入正確的整數（局數與每局最大步數）。",
                     "輸入錯誤",
                     JOptionPane.ERROR_MESSAGE
             );
@@ -138,7 +161,7 @@ public class SnakeWindow extends JFrame {
         if (episodes <= 0 || maxSteps <= 0) {
             JOptionPane.showMessageDialog(
                     this,
-                    "局數與每局最大步數都必須大於 0。",
+                    "局數與每局最大步數必須大於 0。",
                     "輸入錯誤",
                     JOptionPane.ERROR_MESSAGE
             );
@@ -153,55 +176,53 @@ public class SnakeWindow extends JFrame {
 
         gameState.reset();
         statusLabel.setText("規0 自動玩(隨機)中，第 1 局 / " + maxEpisodes
-                + "，速度：" + currentDelayMs + "ms");
+                + "，每局最多 " + maxStepsPerEpisode + " 步。");
 
         startGameLoopTimer(false);
     }
 
-    // 啟動遊戲循環 Timer；useRL\=true 表示使用 Python action.json
+    /**
+     * 啟動遊戲循環 Timer；
+     * \- `useRL\=true`：每步呼叫 `stepFromActionFileOrRandom()`（若有 `action.json` 則用 RL 動作）
+     * \- `useRL\=false`：每步呼叫 `stepRandom()`
+     */
     private void startGameLoopTimer(boolean useRL) {
         if (gameLoopTimer != null) {
             gameLoopTimer.stop();
         }
 
         gameLoopTimer = new Timer(currentDelayMs, e -> {
-            // 1\. 走一步
-            if (useRL) {
-                gameState.stepFromActionFileOrRandom();
-            } else {
-                gameState.stepRandom();
+            if (currentEpisode > maxEpisodes) {
+                gameLoopTimer.stop();
+                statusLabel.setText("全部 " + maxEpisodes + " 局已結束。");
+                return;
             }
-            stepCountInEpisode++;
 
-            // 2\. 重畫
-            snakePanel.repaint();
-
-            // 3\. 檢查一局是否結束
-            if (gameState.isDone() || stepCountInEpisode >= maxStepsPerEpisode) {
+            if (stepCountInEpisode >= maxStepsPerEpisode || gameState.isDone()) {
+                // 本局結束，進入下一局
                 currentEpisode++;
-
-                // 每完成 5 局加速一次
-                if ((currentEpisode - 1) % 5 == 0) {
-                    currentDelayMs = Math.max(minDelayMs, currentDelayMs - 10);
-                }
-
                 if (currentEpisode > maxEpisodes) {
                     gameLoopTimer.stop();
-                    String modeText = useRL ? "RL 自動玩" : "規0 自動玩(隨機)";
-                    statusLabel.setText(modeText + " 結束，共 " + maxEpisodes
-                            + " 局，最終速度：" + currentDelayMs + "ms");
+                    statusLabel.setText("全部 " + maxEpisodes + " 局已結束。");
                     return;
                 }
-
-                // 新的一局
                 stepCountInEpisode = 0;
                 gameState.reset();
-                gameLoopTimer.setDelay(currentDelayMs);
-
-                String modeText = useRL ? "RL 自動玩" : "規0 自動玩(隨機)";
-                statusLabel.setText(modeText + "中，第 " + currentEpisode + " 局 / "
-                        + maxEpisodes + "，速度：" + currentDelayMs + "ms");
+                statusLabel.setText((useRL ? "RL 自動玩中" : "規0 自動玩(隨機)中")
+                        + "，第 " + currentEpisode + " 局 / " + maxEpisodes
+                        + "，每局最多 " + maxStepsPerEpisode + " 步。");
+            } else {
+                // 本局尚未結束，走一步
+                if (useRL) {
+                    // 優先依 `action.json`（eval_play.py 寫的）走一步，沒有檔案就隨機
+                    gameState.stepFromActionFileOrRandom();
+                } else {
+                    gameState.stepRandom();
+                }
+                stepCountInEpisode++;
             }
+
+            snakePanel.repaint();
         });
 
         gameLoopTimer.setInitialDelay(0);
