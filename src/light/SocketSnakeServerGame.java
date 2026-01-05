@@ -11,6 +11,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonElement;
+import java.util.Random; // 新增 Random import
 
 // SocketSnakeServerGame：
 // 這個類同時包含 Swing 視窗（檢視與控制）與後台的 socket server 管理。
@@ -44,6 +45,9 @@ public class SocketSnakeServerGame extends JFrame {
     // Socket 與 Timer
     private SocketSnakeServer socketServer;      // 伺服端物件（負責 accept、send/read）
     private Timer gameLoopTimer;                 // 控制遊戲步進的 Swing Timer
+
+    // 隨機 generator（在 Python 未回應時 fallback 用）
+    private final Random rng = new Random();
 
     // 遊戲控制參數
     private int stepDelayMs = 50;                // 步進延遲 (ms)
@@ -87,13 +91,13 @@ public class SocketSnakeServerGame extends JFrame {
         stopButton.setEnabled(false);
         controlPanel.add(stopButton);
 
-        // 把按鈕提升為欄位，並預設為不可點按，直到 socket 連線成功
-        restartBtn = new JButton("重新開始一局");
-        restartBtn.setEnabled(false);
-        speedUpBtn = new JButton("加速");
-        speedUpBtn.setEnabled(false);
-        slowDownBtn = new JButton("減速");
-        slowDownBtn.setEnabled(false);
+         // 把按鈕提升為欄位，並預設為不可點按，直到 socket 連線成功
+         restartBtn = new JButton("重新開始一局");
+         restartBtn.setEnabled(false);
+         speedUpBtn = new JButton("加速");
+         speedUpBtn.setEnabled(false);
+         slowDownBtn = new JButton("減速");
+         slowDownBtn.setEnabled(false);
 
         restartBtn.addActionListener(e -> resetEpisode());
         speedUpBtn.addActionListener(e -> changeSpeed(-10));
@@ -407,53 +411,98 @@ public class SocketSnakeServerGame extends JFrame {
                 // 診斷輸出：印在 console 上，方便除錯
                 System.out.println("[SocketSnakeServerGame] sendState: reward=" + reward + ", done=" + done + ", episodeReward=" + String.format("%.3f", episodeReward));
 
-                // 傳 STATE 給 Python
-                // include head coords and snake length and food coords
-                socketServer.sendState(board, reward, done,
-                        gameState.getHeadX(), gameState.getHeadY(), gameState.getSnakeLength(),
-                        gameState.getFoodX(), gameState.getFoodY());
+                // 傳 STATE 給 Python（先做防護，避免任何欄位為 null / 非法）
+                int headX = gameState.getHeadX();
+                int headY = gameState.getHeadY();
+                int snakeLen = gameState.getSnakeLength();
+                int foodX = gameState.getFoodX();
+                int foodY = gameState.getFoodY();
+                int direction = gameState.getDirection();
+
+                // 驗證座標範圍，若不合法則設為 -1（Python 端可檢測 -1 表示 unknown）
+                int boardN = gameState.getBoardSize();
+                if (boardN <= 0) boardN = 20;
+                if (headX < 0 || headX >= boardN) headX = -1;
+                if (headY < 0 || headY >= boardN) headY = -1;
+                if (foodX < 0 || foodX >= boardN) foodX = -1;
+                if (foodY < 0 || foodY >= boardN) foodY = -1;
+                if (snakeLen < 0) snakeLen = 0;
+                if (direction < 0 || direction > 3) direction = -1;
+
+                // 記錄要送出的 payload（方便 debug）
+                System.out.println(String.format("[SocketSnakeServerGame] sendState payload: head=(%d,%d), snake_len=%d, food=(%d,%d), dir=%d",
+                        headX, headY, snakeLen, foodX, foodY, direction));
+
+                try {
+                    // 優先使用新簽章（含 head/food/len/dir）
+                    socketServer.sendState(board, reward, done, headX, headY, snakeLen, foodX, foodY, direction);
+                } catch (NoSuchMethodError nsme) {
+                    // 若 socketServer 沒有新簽章（向後相容），改用舊簽章
+                    System.err.println("[SocketSnakeServerGame] sendState: 新簽章不可用，使用舊簽章。" + nsme.getMessage());
+                    try {
+                        socketServer.sendState(board, reward, done);
+                    } catch (IOException ioe2) {
+                        System.err.println("[SocketSnakeServerGame] fallback sendState 失敗: " + ioe2.getMessage());
+                    }
+                } catch (IOException ioe) {
+                    // 若傳送失敗，嘗試用較小的兼容 payload（舊版 sendState）避免斷線
+                    System.err.println("[SocketSnakeServerGame] sendState 發生 IOException，嘗試用最小 payload 傳送並忽略細節: " + ioe.getMessage());
+                    try {
+                        socketServer.sendState(board, reward, done);
+                    } catch (IOException ex2) {
+                        System.err.println("[SocketSnakeServerGame] fallback sendState 也失敗，略過本步驟: " + ex2.getMessage());
+                    }
+                }
+
 
                 // 等待 Python 傳回 ACTION
-                System.out.println("[SocketSnakeServerGame] 等待 client 回傳 ACTION...");
-                int action = socketServer.readAction();
-                System.out.println("[SocketSnakeServerGame] 收到 ACTION=" + action);
+                System.out.println("[SocketSnakeServerGame] 等待 client 回傳 ACTION (timeout=" + stepDelayMs + "ms)...");
+                int action = socketServer.readActionWithTimeout(stepDelayMs);
+                if (action == -1) {
+                    // Python 未在 timeout 內回應，改由 Java 端隨機動作（探索）
+                    action = rng.nextInt(4);
+                    System.out.println("[SocketSnakeServerGame] Python 未回應或回傳非 ACTION，fallback 隨機 action=" + action);
+                } else {
+                    System.out.println("[SocketSnakeServerGame] 收到 ACTION=" + action);
+                }
+
 
                 // 根據動作推進遊戲一步，並更新畫面
                 gameState.stepByAction(action);
-                // 每執行一步，計數 +1
-                stepCountInEpisode++;
-                // DEBUG: 印出步數計數，方便追蹤為何每局只有 10 步
-                System.out.println("[SocketSnakeServerGame] stepCountInEpisode=" + stepCountInEpisode + ", uiMaxSteps=" + uiMaxSteps);
-                // 如果 UI 指定了每局最大步數，且已達到上限，當成本局結束 (truncated)
-                if (uiMaxSteps > 0 && stepCountInEpisode >= uiMaxSteps) {
-                    System.out.println("[SocketSnakeServerGame] 已達每局最大步數上限 (" + uiMaxSteps + ")，將結束本局。");
-                    // 停止 timer 以處理局結束流程（與撞牆邏輯一致）
-                    gameLoopTimer.stop();
-                    // 印出本局 reward
-                    System.out.println("[SocketSnakeServerGame] 第 " + currentEpisode + " 局達到步數上限，上一局總 reward=" + String.format("%.3f", episodeReward));
-                    // 等 1 秒再開始下一局或結束
-                    new Timer(1000, evt -> {
-                        ((Timer) evt.getSource()).stop();
-                        if (currentEpisode < maxEpisodes) {
-                            currentEpisode++;
-                            System.out.println("[SocketSnakeServerGame] 開始第 " + currentEpisode + " 局 (由步數上限觸發)");
-                            // reset accumulator for new episode
-                            episodeReward = 0.0;
-                            stepCountInEpisode = 0;
-                            resetEpisode();
-                            statusLabel.setText("第 " + currentEpisode + " 局 / 共 " + maxEpisodes + " 局");
-                            gameLoopTimer.start();
-                        } else {
-                            statusLabel.setText("全部 " + maxEpisodes + " 局已結束 (由步數上限)。最後一局總 reward=" + String.format("%.3f", episodeReward));
-                            isRunning = false;
-                            startButton.setEnabled(true);
-                            episodesField.setEnabled(true);
-                        }
-                    }).start();
-                    return;
-                 }
-                 snakePanel.updateBoard(gameState.getBoard());
-                 statusLabel.setText("第 " + currentEpisode + " 局 / 共 " + maxEpisodes + " 局，最近動作: " + action);
+                 // 每執行一步，計數 +1
+                 stepCountInEpisode++;
+                 // DEBUG: 印出步數計數，方便追蹤為何每局只有 10 步
+                 System.out.println("[SocketSnakeServerGame] stepCountInEpisode=" + stepCountInEpisode + ", uiMaxSteps=" + uiMaxSteps);
+                 // 如果 UI 指定了每局最大步數，且已達到上限，當成本局結束 (truncated)
+                 if (uiMaxSteps > 0 && stepCountInEpisode >= uiMaxSteps) {
+                     System.out.println("[SocketSnakeServerGame] 已達每局最大步數上限 (" + uiMaxSteps + ")，將結束本局。");
+                     // 停止 timer 以處理局結束流程（與撞牆邏輯一致）
+                     gameLoopTimer.stop();
+                     // 印出本局 reward
+                     System.out.println("[SocketSnakeServerGame] 第 " + currentEpisode + " 局達到步數上限，上一局總 reward=" + String.format("%.3f", episodeReward));
+                     // 等 1 秒再開始下一局或結束
+                     new Timer(1000, evt -> {
+                         ((Timer) evt.getSource()).stop();
+                         if (currentEpisode < maxEpisodes) {
+                             currentEpisode++;
+                             System.out.println("[SocketSnakeServerGame] 開始第 " + currentEpisode + " 局 (由步數上限觸發)");
+                             // reset accumulator for new episode
+                             episodeReward = 0.0;
+                             stepCountInEpisode = 0;
+                             resetEpisode();
+                             statusLabel.setText("第 " + currentEpisode + " 局 / 共 " + maxEpisodes + " 局");
+                             gameLoopTimer.start();
+                         } else {
+                             statusLabel.setText("全部 " + maxEpisodes + " 局已結束 (由步數上限)。最後一局總 reward=" + String.format("%.3f", episodeReward));
+                             isRunning = false;
+                             startButton.setEnabled(true);
+                             episodesField.setEnabled(true);
+                         }
+                     }).start();
+                     return;
+                  }
+                  snakePanel.updateBoard(gameState.getBoard());
+                  statusLabel.setText("第 " + currentEpisode + " 局 / 共 " + maxEpisodes + " 局，最近動作: " + action);
             } catch (IOException ex) {
                 ex.printStackTrace();
                 System.err.println("[SocketSnakeServerGame] 與 Python 通訊失敗: " + ex.getMessage());

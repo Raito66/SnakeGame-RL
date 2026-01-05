@@ -3,8 +3,8 @@ import json
 from typing import Any, Dict, Tuple, Optional
 
 import numpy as np
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 
 HOST = "127.0.0.1"
 PORT = 5000
@@ -151,6 +151,7 @@ class JavaSnakeSocketEnv(gym.Env):
     # ====== gym API ======
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
+        # Gymnasium reset: return (obs, info)
         super().reset(seed=seed)
 
         if self.sock is None:
@@ -161,7 +162,7 @@ class JavaSnakeSocketEnv(gym.Env):
             obs = self._initial_obs
             # clear initial so next reset waits for a new STATE
             self._initial_obs = None
-            return obs
+            return obs, {}
 
         # Otherwise wait for a STATE
         while True:
@@ -171,7 +172,7 @@ class JavaSnakeSocketEnv(gym.Env):
                 obs, reward, done = self._parse_state(msg)
                 self._last_obs = obs
                 self._last_done = done
-                return obs
+                return obs, {}
             elif msg_type == "INIT":
                 payload = msg.get("payload", {}) or {}
                 board_size = int(payload.get("board_size", self.board_size or 0))
@@ -181,6 +182,7 @@ class JavaSnakeSocketEnv(gym.Env):
                 print(f"[JavaSnakeEnv] reset() 忽略封包 type={msg_type}")
 
     def step(self, action: int):
+        # Gymnasium step: return (obs, reward, terminated, truncated, info)
         if self.sock is None:
             raise RuntimeError("socket 尚未連線")
 
@@ -197,13 +199,13 @@ class JavaSnakeSocketEnv(gym.Env):
                 self._last_obs = obs
                 self._last_done = done
                 info: Dict[str, Any] = {}
-                # Return 4-tuple (obs, reward, done, info) expected by SB3's wrappers
-                return obs, reward, done, info
+                # In Gymnasium, return terminated, truncated. We treat 'done' as terminated and truncated=False
+                return obs, reward, bool(done), False, info
             elif msg_type == "RESET":
-                # Java 主動 reset，視為 done=True for gym
+                # Java 主動 reset，視為 terminated=True for gym
                 print("[JavaSnakeEnv] 收到 RESET，下一輪請呼叫 env.reset()")
                 obs = self._last_obs if self._last_obs is not None else self._empty_obs()
-                return obs, 0.0, True, {}
+                return obs, 0.0, True, False, {}
             elif msg_type == "INIT":
                 payload = msg.get("payload", {}) or {}
                 board_size = int(payload.get("board_size", self.board_size or 0))

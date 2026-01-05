@@ -59,8 +59,8 @@ public final class SocketProtocol {
         JsonObject root = new JsonObject();
         root.addProperty("type", msg.getType().name());
         root.add("payload", msg.getPayload());
-        // `SocketSnakeServer` 使用 BufferedWriter.write(line) 之後對方用 readLine()，
-        // 所以這裡加上 '\n'。
+        // `SocketSnakeServer` 使用 BufferedWriter.write(line) 之後對方用 readLine(),
+        // 所以這裡加上 '\n'.
         return GSON.toJson(root) + "\n";
     }
 
@@ -97,12 +97,13 @@ public final class SocketProtocol {
      *   "head_y": int,
      *   "snake_len": int,
      *   "food_x": int,
-     *   "food_y": int
+     *   "food_y": int,
+     *   "direction": int  // 新增：目前方向 0=up,1=down,2=left,3=right
      * }
      */
     public static SocketMessage createStateMessage(int[][] board, double reward, boolean done,
                                                    int headX, int headY, int snakeLen,
-                                                   int foodX, int foodY) {
+                                                   int foodX, int foodY, int direction) {
         JsonObject payload = new JsonObject();
         // 用 Gson 直接把 int[][] 轉成 JsonElement
         payload.add("board", GSON.toJsonTree(board));
@@ -113,6 +114,7 @@ public final class SocketProtocol {
         payload.addProperty("snake_len", snakeLen);
         payload.addProperty("food_x", foodX);
         payload.addProperty("food_y", foodY);
+        payload.addProperty("direction", direction);
         return new SocketMessage(MessageType.STATE, payload);
     }
 

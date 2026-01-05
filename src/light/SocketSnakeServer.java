@@ -88,21 +88,21 @@ public class SocketSnakeServer implements Closeable {
     // ======== 專用 helper：State / Action / Init / Reset / Ping ========
 
     /**
-     * Java → Python：傳送當前棋盤狀態。
+     * Java → Python：傳送當前棋盤狀態（舊版，direction 預設為 -1）。
      *
      * @param board  N x N 的棋盤 (0空,1蛇,2食物)
      * @param reward 此步的 reward
      * @param done   是否結束一局
      */
     public void sendState(int[][] board, double reward, boolean done) throws IOException {
-        // 為相容性保留舊函式：使用占位值填充 head/food/len 欄位
+        // 相容性保留：direction 設為 -1
         SocketProtocol.SocketMessage msg =
-                SocketProtocol.createStateMessage(board, reward, done, -1, -1, 0, -1, -1);
+                SocketProtocol.createStateMessage(board, reward, done, -1, -1, 0, -1, -1, -1);
         sendMessage(msg);
     }
 
     /**
-     * Java → Python：傳送當前棋盤狀態（包含 head/food/len）
+     * Java → Python：傳送當前棋盤狀態（包含 head/food/len/direction）
      *
      * @param board  N x N 的棋盤 (0空,1蛇,2食物)
      * @param reward 此步的 reward
@@ -112,12 +112,13 @@ public class SocketSnakeServer implements Closeable {
      * @param snakeLen 蛇長
      * @param foodX  食物 X
      * @param foodY  食物 Y
+     * @param direction 目前方向 (0=up,1=down,2=left,3=right)
      */
     public void sendState(int[][] board, double reward, boolean done,
                           int headX, int headY, int snakeLen,
-                          int foodX, int foodY) throws IOException {
+                          int foodX, int foodY, int direction) throws IOException {
         SocketProtocol.SocketMessage msg =
-                SocketProtocol.createStateMessage(board, reward, done, headX, headY, snakeLen, foodX, foodY);
+                SocketProtocol.createStateMessage(board, reward, done, headX, headY, snakeLen, foodX, foodY, direction);
         sendMessage(msg);
     }
 
@@ -179,6 +180,47 @@ public class SocketSnakeServer implements Closeable {
             } else {
                 System.out.println("[SocketSnakeServer] 收到非 ACTION 訊息 type=" + type + "，忽略。");
                 continue;
+            }
+        }
+    }
+
+    /**
+     * Read action with timeout. If a valid ACTION message is received within the timeout, return it.
+     * If timeout occurs, return -1 to indicate no action received.
+     */
+    public int readActionWithTimeout(int timeoutMs) throws IOException {
+        ensureConnected();
+        int originalTimeout = 0;
+        try {
+            originalTimeout = clientSocket.getSoTimeout();
+        } catch (Exception ignored) {
+            originalTimeout = 0;
+        }
+        try {
+            clientSocket.setSoTimeout(Math.max(1, timeoutMs));
+            SocketProtocol.SocketMessage msg = readMessage();
+            if (msg == null) {
+                throw new IOException("連線已關閉，讀不到 ACTION。");
+            }
+            if (msg.getType() == SocketProtocol.MessageType.ACTION) {
+                JsonObject payload = msg.getPayload();
+                if (!payload.has("action")) {
+                    throw new IOException("ACTION 封包缺少 `action` 欄位。");
+                }
+                return payload.get("action").getAsInt();
+            } else {
+                // 如果收到 RESET/INIT/PING 等非 ACTION 訊息，回傳 -1 表示逾時/無動作
+                return -1;
+            }
+        } catch (IOException ioe) {
+            if (ioe instanceof java.net.SocketTimeoutException) {
+                return -1; // timeout
+            }
+            throw ioe;
+        } finally {
+            try {
+                clientSocket.setSoTimeout(originalTimeout);
+            } catch (Exception ignored) {
             }
         }
     }
