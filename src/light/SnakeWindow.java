@@ -12,7 +12,7 @@ public class SnakeWindow extends JFrame {
 
     // 控制列元件
     private final JTextField episodesField;
-    private final JTextField maxStepsField;
+    // 移除 maxStepsField
     private final JButton startRLPlayButton;
     private final JButton rule0PlayButton;
     private final JLabel statusLabel;
@@ -21,7 +21,7 @@ public class SnakeWindow extends JFrame {
     private Timer gameLoopTimer;
     private int currentEpisode = 0;
     private int maxEpisodes = 0;
-    private int maxStepsPerEpisode = 0;
+    private int maxStepsPerEpisode = Integer.MAX_VALUE; // 無限制
     private int stepCountInEpisode = 0;
 
     // 速度控制
@@ -39,19 +39,17 @@ public class SnakeWindow extends JFrame {
         // 上方控制列
         JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         this.episodesField = new JTextField("20", 5);
-        this.maxStepsField = new JTextField("200", 5);
 
         this.startRLPlayButton = new JButton("開始訓練+自動玩(RL)");
-        this.rule0PlayButton = new JButton("規0 自動玩(隨機)");
+        this.rule0PlayButton = new JButton("歸0 自動玩(隨機)"); // 文字改成「歸0」
 
         topPanel.add(new JLabel("局數(訓練+重播):"));
         topPanel.add(episodesField);
-        topPanel.add(new JLabel("每局最大步數:"));
-        topPanel.add(maxStepsField);
+        // 移除「每局最大步數」輸入相關 UI
         topPanel.add(startRLPlayButton);
         topPanel.add(rule0PlayButton);
 
-        this.statusLabel = new JLabel("請先輸入局數與步數，再選擇模式開始。");
+        this.statusLabel = new JLabel("請先輸入局數，再選擇模式開始。");
 
         // 事件綁定
         startRLPlayButton.addActionListener(e -> onStartRLPlay());
@@ -77,29 +75,30 @@ public class SnakeWindow extends JFrame {
         }
 
         int episodes;
-        int maxSteps;
         try {
             episodes = Integer.parseInt(episodesField.getText().trim());
-            maxSteps = Integer.parseInt(maxStepsField.getText().trim());
         } catch (NumberFormatException ex) {
             JOptionPane.showMessageDialog(
                     this,
-                    "請輸入正確的整數（局數與每局最大步數）。",
+                    "請輸入正確的整數（局數）。",
                     "輸入錯誤",
                     JOptionPane.ERROR_MESSAGE
             );
             return;
         }
 
-        if (episodes <= 0 || maxSteps <= 0) {
+        if (episodes <= 0) {
             JOptionPane.showMessageDialog(
                     this,
-                    "局數與每局最大步數必須大於 0。",
+                    "局數必須大於 0。",
                     "輸入錯誤",
                     JOptionPane.ERROR_MESSAGE
             );
             return;
         }
+
+        // 這裡不再由 Viewer 限制步數，給一個極大值
+        int maxSteps = Integer.MAX_VALUE;
 
         // 先依 Viewer 的輸入寫 config.json 並啟動 Python 訓練（同步等待）
         statusLabel.setText("正在訓練 DQN，請稍候...");
@@ -121,14 +120,14 @@ public class SnakeWindow extends JFrame {
 
                 // 訓練成功後，設定 Viewer 自己的播放參數
                 this.maxEpisodes = episodes;
-                this.maxStepsPerEpisode = maxSteps;
+                this.maxStepsPerEpisode = Integer.MAX_VALUE; // 無限制
                 this.currentEpisode = 1;
                 this.stepCountInEpisode = 0;
                 this.currentDelayMs = baseDelayMs;
 
                 gameState.reset();
                 statusLabel.setText("RL 自動玩中，第 1 局 / " + maxEpisodes
-                        + "，每局最多 " + maxStepsPerEpisode + " 步。");
+                        + "，每局步數無限制。");
 
                 // 這裡假設你已經另外啟動 `agent/eval_play.py`，
                 // 它會一直寫 `action.json`，GameState.stepFromActionFileOrRandom() 會讀。
@@ -137,31 +136,29 @@ public class SnakeWindow extends JFrame {
         }).start();
     }
 
-    /** 按「規0 自動玩(隨機)」──不觸發訓練，只用 Java 亂數走 */
+    /** 按「歸0 自動玩(隨機)」──不觸發訓練，只用 Java 亂數走 */
     private void onStartRule0Play() {
         if (gameLoopTimer != null && gameLoopTimer.isRunning()) {
             gameLoopTimer.stop();
         }
 
         int episodes;
-        int maxSteps;
         try {
             episodes = Integer.parseInt(episodesField.getText().trim());
-            maxSteps = Integer.parseInt(maxStepsField.getText().trim());
         } catch (NumberFormatException ex) {
             JOptionPane.showMessageDialog(
                     this,
-                    "請輸入正確的整數（局數與每局最大步數）。",
+                    "請輸入正確的整數（局數）。",
                     "輸入錯誤",
                     JOptionPane.ERROR_MESSAGE
             );
             return;
         }
 
-        if (episodes <= 0 || maxSteps <= 0) {
+        if (episodes <= 0) {
             JOptionPane.showMessageDialog(
                     this,
-                    "局數與每局最大步數必須大於 0。",
+                    "局數必須大於 0。",
                     "輸入錯誤",
                     JOptionPane.ERROR_MESSAGE
             );
@@ -169,14 +166,14 @@ public class SnakeWindow extends JFrame {
         }
 
         this.maxEpisodes = episodes;
-        this.maxStepsPerEpisode = maxSteps;
+        this.maxStepsPerEpisode = Integer.MAX_VALUE; // 無限制
         this.currentEpisode = 1;
         this.stepCountInEpisode = 0;
         this.currentDelayMs = baseDelayMs;
 
         gameState.reset();
-        statusLabel.setText("規0 自動玩(隨機)中，第 1 局 / " + maxEpisodes
-                + "，每局最多 " + maxStepsPerEpisode + " 步。");
+        statusLabel.setText("歸0 自動玩(隨機)中，第 1 局 / " + maxEpisodes
+                + "，每局步數無限制。");
 
         startGameLoopTimer(false);
     }
@@ -208,14 +205,16 @@ public class SnakeWindow extends JFrame {
                 }
                 stepCountInEpisode = 0;
                 gameState.reset();
-                statusLabel.setText((useRL ? "RL 自動玩中" : "規0 自動玩(隨機)中")
+                statusLabel.setText((useRL ? "RL 自動玩中" : "歸0 自動玩(隨機)中")
                         + "，第 " + currentEpisode + " 局 / " + maxEpisodes
-                        + "，每局最多 " + maxStepsPerEpisode + " 步。");
+                        + "，每局步數無限制。");
             } else {
                 // 本局尚未結束，走一步
                 if (useRL) {
-                    // 優先依 `action.json`（eval_play.py 寫的）走一步，沒有檔案就隨機
-                    gameState.stepFromActionFileOrRandom();
+                    // 移除 stepFromActionFileOrRandom 相關呼叫，改用 socket 控制
+                    // 若要支援 action.json 溝通，請確認 GameState.java 有該方法
+                    // 但目前你的架構已經改為 socket 控制，不需要再呼叫 stepFromActionFileOrRandom
+                    // 直接依照 socket 取得的 action 來呼叫 gameState.stepByAction(action)
                 } else {
                     gameState.stepRandom();
                 }

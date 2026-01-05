@@ -6,110 +6,85 @@ import java.io.FileWriter;
 import java.io.IOException;
 
 /**
- * 統一負責：
- * 1\) 寫入 `agent/config.json`
- * 2\) 從 Java 呼叫 Python `train_agent.py`，同步等待結束
+ * 統一處理：寫 config.json 並從 Java 啟動 Python 訓練程式。
+ * 供 SnakeWindow 等 UI 呼叫。
  */
 public class PythonTrainerLauncher {
 
-    // 依實際專案根目錄調整
-    private static final String PROJECT_ROOT = "D:\\workspace\\SnakeGame-RL";
-    private static final String AGENT_DIR = PROJECT_ROOT + "\\agent";
-    private static final String CONFIG_PATH = AGENT_DIR + "\\config.json";
+    // 專案根目錄下的 agent 目錄，相對於執行路徑可視情況調整
+    private static final String AGENT_DIR = "D:\\workspace\\SnakeGame-RL\\agent";
+    private static final String CONFIG_PATH = AGENT_DIR + File.separator + "config.json";
 
     /**
-     * 將 episodes/max\_steps 寫入 `config.json`，並在同一個視窗中啟動 `python train_agent.py`。
-     * 若訓練成功完成回傳 true，否則 false。
+     * 寫入 config.json 並啟動 Python 的 train_agent.py。
+     * 此方法會阻塞直到 Python 訓練程式結束，回傳是否成功。
+     *
+     * \param parent   用來顯示錯誤訊息的父視窗，可為 null
+     * \param episodes 局數
+     * \param maxSteps 每局最大步數
+     * \return true\=Python 正常結束且退出碼為 0；false\=發生例外或退出碼非 0
      */
     public static boolean runTrainingWithConfig(JFrame parent, int episodes, int maxSteps) {
         try {
-            // 1\) 寫 config.json
             writeConfigJson(episodes, maxSteps);
         } catch (IOException e) {
+            showError(parent, "寫入 `agent/config.json` 失敗:\\n" + e.getMessage());
             e.printStackTrace();
-            JOptionPane.showMessageDialog(
-                    parent,
-                    "寫入 config.json 失敗： " + e.getMessage(),
-                    "錯誤",
-                    JOptionPane.ERROR_MESSAGE
-            );
             return false;
         }
 
-        // 2\) 啟動 Python 訓練並同步等待結束
-        return startPythonTrainerBlocking(parent);
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                    "cmd.exe", "/c",
+                    "cd /d " + AGENT_DIR + " && python train_agent.py"
+            );
+            pb.inheritIO(); // 讓 Python 輸出直接顯示在同一個 console
+            Process process = pb.start();
+
+            int exitCode = process.waitFor();
+            if (exitCode != 0) {
+                showError(parent, "Python 訓練程式結束時返回碼非 0，exitCode =" + exitCode);
+                return false;
+            }
+            return true;
+        } catch (IOException e) {
+            showError(parent, "啟動 Python 訓練程式失敗:\\n" + e.getMessage());
+            e.printStackTrace();
+            return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            showError(parent, "等待 Python 訓練程式結束時被中斷。");
+            return false;
+        }
     }
 
-    /** 寫 `agent/config.json` */
+    /**
+     * 寫 `agent/config.json`，內容為 episodes / max_steps。
+     */
     private static void writeConfigJson(int episodes, int maxSteps) throws IOException {
         File configFile = new File(CONFIG_PATH);
-        File dir = configFile.getParentFile();
-        if (dir != null && !dir.exists()) {
-            if (!dir.mkdirs()) {
-                throw new IOException("建立 agent 目錄失敗: " + dir.getAbsolutePath());
+        File parentDir = configFile.getParentFile();
+        if (parentDir != null && !parentDir.exists()) {
+            if (!parentDir.mkdirs()) {
+                throw new IOException("無法建立目錄: " + parentDir.getAbsolutePath());
             }
         }
 
-        // 與 `RunTrainer` 一樣的 JSON 結構
         String json = "{"
                 + "\"episodes\":" + episodes + ","
                 + "\"max_steps\":" + maxSteps
                 + "}";
 
-        try (FileWriter fw = new FileWriter(configFile, false)) {
+        try (FileWriter fw = new FileWriter(configFile)) {
             fw.write(json);
         }
     }
 
-    /**
-     * 在 `AGENT_DIR` 下執行：`python train_agent.py`，並等待程式結束。
-     */
-    private static boolean startPythonTrainerBlocking(JFrame parent) {
-        ProcessBuilder pb = new ProcessBuilder(
-                "cmd.exe", "/c",
-                "cd /d " + AGENT_DIR + " && python train_agent.py"
-        );
-        pb.directory(new File(AGENT_DIR));
-        // 把 Python 的 stdout/stderr 直接印在目前啟動 Java 的 console
-        pb.inheritIO();
-
-        try {
-            Process p = pb.start();
-            int exitCode = p.waitFor();
-            if (exitCode != 0) {
-                JOptionPane.showMessageDialog(
-                        parent,
-                        "Python 訓練程式結束，但 exit code\=" + exitCode,
-                        "訓練失敗",
-                        JOptionPane.ERROR_MESSAGE
-                );
-                return false;
-            }
-            JOptionPane.showMessageDialog(
-                    parent,
-                    "Python 訓練完成！（exit code\=0）",
-                    "訓練完成",
-                    JOptionPane.INFORMATION_MESSAGE
-            );
-            return true;
-        } catch (IOException e) {
-            e.printStackTrace();
-            JOptionPane.showMessageDialog(
-                    parent,
-                    "啟動 Python 訓練程式失敗： " + e.getMessage(),
-                    "錯誤",
-                    JOptionPane.ERROR_MESSAGE
-            );
-            return false;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            JOptionPane.showMessageDialog(
-                    parent,
-                    "等待 Python 訓練程式時被中斷。",
-                    "錯誤",
-                    JOptionPane.ERROR_MESSAGE
-            );
-            return false;
+    private static void showError(JFrame parent, String message) {
+        if (parent != null) {
+            JOptionPane.showMessageDialog(parent, message, "錯誤", JOptionPane.ERROR_MESSAGE);
+        } else {
+            System.err.println(message);
         }
     }
 }

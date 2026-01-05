@@ -1,15 +1,7 @@
 package light;
 
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
 import java.util.LinkedList;
 import java.util.Random;
-
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.JsonObject;
 
 public class GameState {
 
@@ -27,27 +19,30 @@ public class GameState {
     private final Random random = new Random();
     private final int size = 20; // 棋盤邊長
 
-    // JSON 檔路徑（相對於 Python agent）
-    private static final String GAME_STATE_PATH = "../game_state.json";
-    private static final String ACTION_PATH = "../action.json";
-
-    private static final Gson GSON = new GsonBuilder().create();
+    // 明確：不啟用穿牆（wrap）行為；撞到格子邊界即視為撞牆
+    private boolean wrapWalls = false;
+    // 上一步方向（用於偵測是否轉彎）
+    private int lastDirection = -1;
 
     public GameState() {
         reset();
     }
 
-    /** 重新開始一局，並寫出初始 JSON */
+    /** 重新開始一局 */
     public void reset() {
         board = new int[size][size];
         snakeBody = new LinkedList<>();
 
-        // 蛇從中間開始
+        // 蛇從中間開始，預設長度 3。頭在中心，身體往左延伸
         int startX = size / 2;
         int startY = size / 2;
         snakeBody.clear();
-        snakeBody.add(new int[]{startX, startY});
-        direction = 1; // 一開始往右
+        for (int i = 0; i < 3; i++) {
+            snakeBody.add(new int[]{startX - i, startY});
+        }
+        // 初始方向隨機，避免每局都往同一方向（降低每次剛好 10 步到牆的情況）
+        direction = random.nextInt(4);
+        lastDirection = direction;
         done = false;
         reward = 0.0;
 
@@ -56,9 +51,6 @@ public class GameState {
 
         // 更新棋盤陣列
         updateBoardFromState();
-
-        // 寫出初始狀態，給 Python detect_board_size / reset 用
-        writeToJson(GAME_STATE_PATH);
     }
 
     /** 是否 GameOver */
@@ -66,47 +58,17 @@ public class GameState {
         return done;
     }
 
-    /**
-     * 優先依照 Python 寫的 `../action.json` 走一步，
-     * 若檔案不存在或解析失敗則改用隨機步。
-     */
-    public void stepFromActionFileOrRandom() {
-        if (done) {
-            return;
-        }
-
-        boolean usedAction = false;
-        File actionFile = new File(ACTION_PATH);
-
-        if (actionFile.isFile()) {
-            try (FileReader fr = new FileReader(actionFile)) {
-                JsonObject obj = GSON.fromJson(fr, JsonObject.class);
-                if (obj != null && obj.has("action")) {
-                    int action = obj.get("action").getAsInt();
-                    stepByAction(action);
-                    usedAction = true;
-                }
-            } catch (Exception e) {
-                // 若讀檔失敗，之後改用隨機
-            }
-        }
-
-        if (!usedAction) {
-            stepRandom();
-        }
-    }
-
-    /** 隨機一個方向走一步，並寫出 JSON（給純 UI 測試時用） */
+    /** 隨機一個方向走一步 */
     public void stepRandom() {
         if (done) {
             return;
         }
+        lastDirection = direction;
         direction = random.nextInt(4);
         stepByDirection();
-        writeToJson(GAME_STATE_PATH);
     }
 
-    /** 依外部 action 0\~3 走一步，並寫出 JSON（給 Python 用） */
+    /** 依外部 action 0~3 走一步 */
     public void stepByAction(int action) {
         if (done) {
             return;
@@ -114,9 +76,14 @@ public class GameState {
         if (action < 0 || action > 3) {
             action = 0;
         }
+        // 保留上一個方向以判斷是否有轉彎
+        this.lastDirection = this.direction;
         this.direction = action;
         stepByDirection();
-        writeToJson(GAME_STATE_PATH);
+    }
+
+    private int manhattan(int x1, int y1, int x2, int y2) {
+        return Math.abs(x1 - x2) + Math.abs(y1 - y2);
     }
 
     /** 依目前 direction 走一步（核心蛇邏輯） */
@@ -126,46 +93,106 @@ public class GameState {
         }
 
         int[] head = snakeBody.getFirst();
-        int x = head[0];
-        int y = head[1];
+        int curX = head[0];
+        int curY = head[1];
 
+        int newX = curX;
+        int newY = curY;
         switch (direction) {
-            case 0: y -= 1; break; // 上
-            case 1: x += 1; break; // 右
-            case 2: y += 1; break; // 下
-            case 3: x -= 1; break; // 左
+            case 0: newY = curY - 1; break; // 上
+            case 1: newX = curX + 1; break; // 右
+            case 2: newY = curY + 1; break; // 下
+            case 3: newX = curX - 1; break; // 左
             default: break;
         }
 
-        reward = 0.0;
+        // Reward shaping: base step penalty
+        double stepReward = -0.01; // 每步微小懲罰，鼓勵短路徑
 
-        // 撞牆：game over + 負獎勵
-        if (x < 0 || x >= size || y < 0 || y >= size) {
+        // 檢查是否撞牆（grid 邊界）
+        boolean hitWall = false;
+        if (!wrapWalls) {
+            if (newX < 0 || newX >= size || newY < 0 || newY >= size) {
+                hitWall = true;
+            }
+        } else {
+            // 若啟用 wrap（目前預設 false），則環繞
+            newX = (newX % size + size) % size;
+            newY = (newY % size + size) % size;
+        }
+
+        // 計算距離變化（舊距離與新距離）
+        int oldDist = manhattan(curX, curY, foodX, foodY);
+        int newDist = (hitWall ? oldDist : manhattan(newX, newY, foodX, foodY));
+        // 接近食物給正獎勵，但 scale 很小，避免單步負獎懲過大影響學習
+        // 原本 1.0 * delta 導致走遠一格就是 -1.0，會過度懲罰，改成按距離差乘 0.2，再 clamp
+        double rawDistDelta = (double)(oldDist - newDist);
+        double distBonus = 0.2 * rawDistDelta; // 每格差值最多帶來 +/-0.2
+        // clamp distBonus 到 [-0.5, 0.5]
+        if (distBonus > 0.5) distBonus = 0.5;
+        if (distBonus < -0.5) distBonus = -0.5;
+
+        // 轉彎獎勵：當 agent 改變方向且該變動使距離縮短，給較高的額外獎勵
+        boolean isTurn = (this.lastDirection >= 0 && this.lastDirection != this.direction);
+        double turnBonus = 0.0;
+        if (isTurn && newDist < oldDist) {
+            turnBonus = 0.6; // 增加到 0.6
+        }
+
+        // 先判斷是否會吃食物（用 newX/newY）
+        boolean willEat = false;
+        if (!hitWall) {
+            willEat = (newX == foodX && newY == foodY);
+        }
+
+        // DEBUG: 印出本步計算的座標與狀態
+        System.out.println(String.format("[GameState] calc head=(%d,%d) food=(%d,%d) willEat=%b oldDist=%d newDist=%d", newX, newY, foodX, foodY, willEat, oldDist, newDist));
+
+        // 若撞牆則直接結束（不要 addFirst 重複 head）
+        if (hitWall) {
             done = true;
-            reward = -1.0;
+            reward = -10.0; // 死亡較重懲罰
+            updateBoardFromState();
+            System.out.println(String.format("[GameState] DONE triggered: hitWall=%b selfCollision=%b newHead=(%d,%d)", hitWall, false, newX, newY));
             return;
         }
 
-        // 撞到自己：game over + 負獎勵
-        for (int[] body : snakeBody) {
-            if (body[0] == x && body[1] == y) {
-                done = true;
-                reward = -1.0;
-                return;
+        // 判斷是否撞到自己：允許移入尾巴的位置（當且僅當本步不會吃食物，因為吃食物會令尾巴不移除）
+        boolean selfCollision = false;
+        int tailIndex = snakeBody.size() - 1;
+        for (int i = 0; i < snakeBody.size(); i++) {
+            int[] b = snakeBody.get(i);
+            if (b[0] == newX && b[1] == newY) {
+                if (i != tailIndex || willEat) {
+                    selfCollision = true;
+                    break;
+                }
             }
         }
 
-        // 新頭位置
-        int[] newHead = new int[]{x, y};
+        // 新頭
+        int[] newHead = new int[]{newX, newY};
         snakeBody.addFirst(newHead);
 
+        // 若撞自己，標示為結束並給負分；仍更新 board 讓 UI 顯示最後位置
+        if (selfCollision) {
+            done = true;
+            reward = -10.0;
+            updateBoardFromState();
+            System.out.println(String.format("[GameState] DONE triggered: hitWall=%b selfCollision=%b newHead=(%d,%d)", false, selfCollision, newX, newY));
+            return;
+        }
+
         // 吃到食物：加長、不移除尾，重生食物 + 正獎勵
-        if (x == foodX && y == foodY) {
-            reward = 1.0;
-            spawnFood();
+        if (willEat) {
+            reward = 12.0; // 吃到食物給大正分
+            spawnFood(); // 產生下一個食物
         } else {
             // 一般移動：移除尾巴，長度不變
-            reward = 0.0;
+            reward = stepReward + distBonus + turnBonus; // 微懲罰加上接近食物的獎勵與轉彎獎勵
+            // clamp 單步 reward 範圍，避免極端值影響 Q 更新
+            if (reward > 1.0) reward = 1.0;
+            if (reward < -1.0) reward = -1.0;
             snakeBody.removeLast();
         }
 
@@ -224,27 +251,36 @@ public class GameState {
         return board;
     }
 
-    /** 寫出當前狀態到 JSON，給 Python `JavaSnakeEnv` 用 */
-    public void writeToJson(String path) {
-        JsonObject root = new JsonObject();
+    /** 給 RL 用的 reward */
+    public double getReward() {
+        return reward;
+    }
 
-        // board 深拷貝
-        int[][] b = this.board;
-        int n = b.length;
-        int[][] copy = new int[n][n];
-        for (int i = 0; i < n; i++) {
-            System.arraycopy(b[i], 0, copy[i], 0, n);
-        }
-        root.add("board", GSON.toJsonTree(copy));
+    /** 取得蛇頭 X */
+    public int getHeadX() {
+        if (snakeBody == null || snakeBody.isEmpty()) return -1;
+        return snakeBody.getFirst()[0];
+    }
 
-        // reward / done
-        root.addProperty("reward", this.reward);
-        root.addProperty("done", this.done);
+    /** 取得蛇頭 Y */
+    public int getHeadY() {
+        if (snakeBody == null || snakeBody.isEmpty()) return -1;
+        return snakeBody.getFirst()[1];
+    }
 
-        try (FileWriter fw = new FileWriter(path)) {
-            GSON.toJson(root, fw);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+    /** 取得蛇長 */
+    public int getSnakeLength() {
+        if (snakeBody == null) return 0;
+        return snakeBody.size();
+    }
+
+    /** 取得食物 X */
+    public int getFoodX() {
+        return foodX;
+    }
+
+    /** 取得食物 Y */
+    public int getFoodY() {
+        return foodY;
     }
 }
